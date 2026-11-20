@@ -20,6 +20,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "Notepad_plus.h"
+#include "NoteQuProductUI.h"
 
 #include <shlwapi.h>
 #include <wininet.h>
@@ -659,6 +660,7 @@ LRESULT Notepad_plus::init(HWND hwnd)
 	}
 
 	_nativeLangSpeaker.changeMenuLang(_mainMenuHandle);
+	NoteQuProductUI::applyMenuLabels(_mainMenuHandle, _nativeLangSpeaker);
     ::ModifyMenuW(_mainMenuHandle, IDM_UPDATE_NPP, MF_BYCOMMAND | MF_STRING, IDM_UPDATE_NPP, L"Check for NoteQu Updates...");
     ::ModifyMenuW(_mainMenuHandle, IDM_CONFUPDATERPROXY, MF_BYCOMMAND | MF_STRING, IDM_CONFUPDATERPROXY, L"Plugin Updater Proxy...");
 	::DrawMenuBar(hwnd);
@@ -740,6 +742,8 @@ LRESULT Notepad_plus::init(HWND hwnd)
 	_rebarTop.init(_pPublicInterface->getHinst(), hwnd);
 	_rebarBottom.init(_pPublicInterface->getHinst(), hwnd);
 	_toolBar.addToRebar(&_rebarTop);
+	if (!_toolBar.hasNativeCustomizer())
+		EnableMenuItem(_mainMenuHandle, IDM_NOTEQU_MAIN_TOOLBAR, MF_BYCOMMAND | MF_GRAYED);
 	_rebarTop.setIDVisible(REBAR_BAR_TOOLBAR, willBeShown);
 	_noteQuTools.init(_pPublicInterface->getHinst(), hwnd, &_pEditView,
 	                  nppParam.getUserPath(), _nativeLangSpeaker);
@@ -7331,6 +7335,7 @@ bool Notepad_plus::reloadLang()
     nppParam.reloadContextMenuFromXmlTree(_mainMenuHandle, _pluginsManager.getMenuHandle());
 
 	_nativeLangSpeaker.changeMenuLang(_mainMenuHandle);
+	NoteQuProductUI::applyMenuLabels(_mainMenuHandle, _nativeLangSpeaker);
     ::ModifyMenuW(_mainMenuHandle, IDM_UPDATE_NPP, MF_BYCOMMAND | MF_STRING, IDM_UPDATE_NPP, L"Check for NoteQu Updates...");
     ::ModifyMenuW(_mainMenuHandle, IDM_CONFUPDATERPROXY, MF_BYCOMMAND | MF_STRING, IDM_CONFUPDATERPROXY, L"Plugin Updater Proxy...");
     ::DrawMenuBar(_pPublicInterface->getHSelf());
@@ -9156,9 +9161,10 @@ void Notepad_plus::updateCommandShortcuts()
 	for (CommandShortcut& csc : nppParam.getUserShortcuts())
 	{
 		unsigned long id = csc.getID();
-		wstring localizedMenuName = _nativeLangSpeaker.getNativeLangMenuString(id);
+		const auto productLabel = NoteQuProductUI::menuLabel(id, _nativeLangSpeaker);
+		wstring localizedMenuName = productLabel ? productLabel : _nativeLangSpeaker.getNativeLangMenuString(id);
 		wstring menuName = localizedMenuName;
-		wstring shortcutName = _nativeLangSpeaker.getShortcutNameString(id);
+		wstring shortcutName = productLabel ? purgeMenuItemString(productLabel) : _nativeLangSpeaker.getShortcutNameString(id);
 
 		if (menuName.length() == 0)
 		{

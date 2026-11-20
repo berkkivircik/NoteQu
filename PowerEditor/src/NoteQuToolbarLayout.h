@@ -89,19 +89,25 @@ inline Layout load(const std::filesystem::path &path) {
   return layout;
 }
 
-inline bool save(const std::filesystem::path &path, const Layout &layout) {
+template <typename Writer>
+inline bool writeLayout(const std::filesystem::path &path, Writer write) {
   auto temporary = path;
   temporary += L".tmp-" + std::to_wstring(GetCurrentProcessId());
   std::ofstream output(temporary, std::ios::trunc);
-  output << "NOTEQUTOOLBAR1\n";
-  for (const auto &choice : layout)
-    output << (choice.visible ? '1' : '0') << ' '
-           << tools[choice.id - Family].key << '\n';
+  write(output);
   output.close();
   if (output && MoveFileExW(temporary.c_str(), path.c_str(),
                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     return true;
   DeleteFileW(temporary.c_str());
   return false;
+}
+inline bool save(const std::filesystem::path &path, const Layout &layout) {
+  return writeLayout(path, [&](std::ostream &output) {
+    output << "NOTEQUTOOLBAR1\n";
+    for (const auto &choice : layout)
+      output << (choice.visible ? '1' : '0') << ' '
+             << tools[choice.id - Family].key << '\n';
+  });
 }
 } // namespace NoteQuToolbar

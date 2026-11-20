@@ -26,6 +26,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -45,6 +46,8 @@
 #include "shortcut.h"
 #include "AboutDlg.h"
 #include "localization.h"
+#include "NoteQuProductUI.h"
+#include "NoteQuToolbarLayout.h"
 
 static constexpr DWORD WS_TOOLBARSTYLE = WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | TBSTYLE_TOOLTIPS | TBSTYLE_FLAT | TBSTYLE_TRANSPARENT | CCS_TOP | CCS_NOPARENTALIGN | CCS_NORESIZE | CCS_NODIVIDER;
 
@@ -357,6 +360,14 @@ bool ToolBar::init(HINSTANCE hInst, HWND hPere, toolBarStatusType type, const To
 		}
 	}
 
+	_nativeCustomizer = !GetModuleHandleW(L"CustomizeToolbar.dll") && !GetModuleHandleW(L"_CustomizeToolbar.dll");
+	if (_nativeCustomizer) {
+		_mainLayoutPath = std::filesystem::path(NppParameters::getInstance().getUserPath()) / L"notequ-main-toolbar.cfg";
+		for (size_t index = 0; index < _nbButtons; ++index)
+			if (_pTBB[index].idCommand)
+				_mainDefaults.push_back({_pTBB[index].idCommand, (_pTBB[index].fsState & TBSTATE_HIDDEN) == 0});
+		loadMainLayout();
+	}
 	reset(true);	//load icons etc
 
 	return true;
@@ -385,11 +396,10 @@ int ToolBar::getWidth() const
 {
 	RECT btnRect{};
 	int totalWidth = 0;
-	for (size_t i = 0; i < _nbCurrentButtons; ++i)
-	{
-		::SendMessage(_hSelf, TB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&btnRect));
-		totalWidth += btnRect.right - btnRect.left;
-	}
+	const auto count = SendMessageW(_hSelf, TB_BUTTONCOUNT, 0, 0);
+	for (LRESULT i = 0; i < count; ++i)
+		if (SendMessageW(_hSelf, TB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&btnRect)))
+			totalWidth += btnRect.right - btnRect.left;
 	return totalWidth;
 }
 
@@ -446,16 +456,182 @@ void ToolBar::setToBmpIcons()
 	Window::redraw();
 }
 
+
+namespace {
+using ToolbarChoices = std::vector<ToolBar::Choice>;
+
+struct MainToolbarDialog {
+    ToolbarChoices draft;
+    const ToolbarChoices &defaults;
+    const NoteQuProductUI::Labels &text;
+    HMENU menu;
+    const std::filesystem::path &path;
+
+    void populate(HWND list, int selected) const {
+        ListView_DeleteAllItems(list);
+        for (size_t i = 0; i < draft.size(); ++i) {
+            wchar_t label[256]{};
+            GetMenuStringW(menu, draft[i].command, label, _countof(label), MF_BYCOMMAND);
+            std::wstring name(label);
+            if (const auto tab = name.find(L'\t'); tab != std::wstring::npos)
+                name.resize(tab);
+            std::erase(name, L'&');
+            if (name.empty())
+                name = std::to_wstring(draft[i].command);
+            LVITEMW item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = static_cast<int>(i);
+            item.pszText = name.data();
+            ListView_InsertItem(list, &item);
+            ListView_SetCheckState(list, item.iItem, draft[i].visible);
+        }
+        if (selected >= 0) {
+            ListView_SetItemState(list, selected, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_EnsureVisible(list, selected, FALSE);
+        }
+    }
+
+    void readChecks(HWND list) {
+        for (size_t i = 0; i < draft.size(); ++i)
+            draft[i].visible = ListView_GetCheckState(list, static_cast<int>(i)) != FALSE;
+    }
+};
+
+INT_PTR CALLBACK mainToolbarProc(HWND dialog, UINT message, WPARAM wp, LPARAM lp) {
+    auto state = reinterpret_cast<MainToolbarDialog *>(GetWindowLongPtrW(dialog, DWLP_USER));
+    const HWND list = GetDlgItem(dialog, IDC_NOTEQU_FORMAT_TOOLBAR_LIST);
+    if (message == WM_INITDIALOG) {
+        state = reinterpret_cast<MainToolbarDialog *>(lp);
+        SetWindowLongPtrW(dialog, DWLP_USER, reinterpret_cast<LONG_PTR>(state));
+        const auto &text = state->text;
+        SetWindowTextW(dialog, text.mainToolbar);
+        SetDlgItemTextW(dialog, IDC_NOTEQU_FORMAT_TOOLBAR_HINT, text.hint);
+        SetDlgItemTextW(dialog, IDC_NOTEQU_FORMAT_TOOLBAR_UP, text.up);
+        SetDlgItemTextW(dialog, IDC_NOTEQU_FORMAT_TOOLBAR_DOWN, text.down);
+        SetDlgItemTextW(dialog, IDC_NOTEQU_FORMAT_TOOLBAR_RESET, text.reset);
+        SetDlgItemTextW(dialog, IDOK, text.apply);
+        SetDlgItemTextW(dialog, IDCANCEL, text.cancel);
+        ListView_SetExtendedListViewStyle(list, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        RECT client{};
+        GetClientRect(list, &client);
+        LVCOLUMNW column{};
+        column.mask = LVCF_WIDTH;
+        column.cx = client.right - GetSystemMetrics(SM_CXVSCROLL);
+        ListView_InsertColumn(list, 0, &column);
+        NppDarkMode::autoSubclassAndThemeChildControls(dialog);
+        NppDarkMode::setDarkTitleBar(dialog);
+        state->populate(list, 0);
+        return TRUE;
+    }
+    if (!state)
+        return FALSE;
+    if (message == WM_CTLCOLORDLG)
+        return NppDarkMode::onCtlColorDlg(reinterpret_cast<HDC>(wp));
+    if (message == WM_CTLCOLORSTATIC)
+        return NppDarkMode::onCtlColorDlgStaticText(reinterpret_cast<HDC>(wp), true);
+    if (message == WM_CLOSE) {
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    if (message != WM_COMMAND)
+        return FALSE;
+    switch (LOWORD(wp)) {
+    case IDCANCEL:
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    case IDC_NOTEQU_FORMAT_TOOLBAR_RESET:
+        state->draft = state->defaults;
+        state->populate(list, 0);
+        return TRUE;
+    case IDC_NOTEQU_FORMAT_TOOLBAR_UP:
+    case IDC_NOTEQU_FORMAT_TOOLBAR_DOWN: {
+        const int index = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+        const int target = index + (LOWORD(wp) == IDC_NOTEQU_FORMAT_TOOLBAR_UP ? -1 : 1);
+        if (index >= 0 && target >= 0 && target < static_cast<int>(state->draft.size())) {
+            state->readChecks(list);
+            std::swap(state->draft[index], state->draft[target]);
+            state->populate(list, target);
+        }
+        return TRUE;
+    }
+    case IDOK:
+        state->readChecks(list);
+        if (!NoteQuToolbar::writeLayout(state->path, [&](std::ostream &out) {
+            out << "NOTEQUMAINTOOLBAR1\n";
+            for (const auto &choice : state->draft)
+                out << choice.command << ' ' << (choice.visible ? 1 : 0) << '\n';
+        })) {
+            MessageBoxW(dialog, state->text.saveError, state->text.mainToolbar, MB_OK | MB_ICONERROR);
+        } else {
+            EndDialog(dialog, IDOK);
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+} // namespace
+
+void ToolBar::loadMainLayout() {
+    _mainLayout = _mainDefaults;
+    std::error_code error;
+    if (std::filesystem::file_size(_mainLayoutPath, error) > 8192 || error)
+        return;
+    std::ifstream input(_mainLayoutPath);
+    std::string line;
+    if (!std::getline(input, line) || line != "NOTEQUMAINTOOLBAR1")
+        return;
+    ToolbarChoices saved;
+    auto remaining = _mainDefaults;
+    while (std::getline(input, line)) {
+        std::istringstream fields(line);
+        int command, visible;
+        char trailing;
+        if (!(fields >> command >> visible) || (visible != 0 && visible != 1) || (fields >> trailing))
+            return;
+        const auto choice = std::find_if(remaining.begin(), remaining.end(),
+            [command](const Choice &entry) { return entry.command == command; });
+        if (choice == remaining.end()) {
+            if (std::any_of(saved.begin(), saved.end(), [command](const Choice &entry) { return entry.command == command; }))
+                return;
+            continue;
+        }
+        saved.push_back({command, visible != 0});
+        remaining.erase(choice);
+    }
+    if (input.bad())
+        return;
+    saved.insert(saved.end(), remaining.begin(), remaining.end());
+    _mainLayout = std::move(saved);
+}
+
+void ToolBar::customize(const NativeLangSpeaker &language, HMENU menu) {
+    if (!_nativeCustomizer)
+        return;
+    MainToolbarDialog state{_mainLayout, _mainDefaults, NoteQuProductUI::labels(language), menu, _mainLayoutPath};
+    if (DialogBoxParamW(_hInst, MAKEINTRESOURCEW(IDD_NOTEQU_FORMAT_TOOLBAR), _hParent,
+        mainToolbarProc, reinterpret_cast<LPARAM>(&state)) == IDOK) {
+        _mainLayout = std::move(state.draft);
+        // Rebuild using the current icon set and the new button order.
+        resizeIconsDpi(_dpiManager.getDpi());
+        RECT client{};
+        GetClientRect(_hParent, &client);
+        SendMessageW(_hParent, WM_SIZE, IsZoomed(_hParent) ? SIZE_MAXIMIZED : SIZE_RESTORED,
+                     MAKELPARAM(client.right, client.bottom));
+    }
+}
+
+
 void ToolBar::reset(bool create)
 {
 	if (create && _hSelf)
 	{
 		//Store current button state information
-		TBBUTTON tempBtn{};
-		for (size_t i = 0; i < _nbCurrentButtons; ++i)
-		{
-			::SendMessage(_hSelf, TB_GETBUTTON, i, reinterpret_cast<LPARAM>(&tempBtn));
-			_pTBB[i].fsState = tempBtn.fsState;
+		for (size_t i = 0; i < _nbTotalButtons; ++i) {
+			if (!_pTBB[i].idCommand)
+				continue;
+			const auto flags = SendMessageW(_hSelf, TB_GETSTATE, _pTBB[i].idCommand, 0);
+			if (flags >= 0)
+				_pTBB[i].fsState = static_cast<BYTE>(flags);
 		}
 		::DestroyWindow(_hSelf);
 		_hSelf = NULL;
@@ -589,10 +765,32 @@ void ToolBar::reset(bool create)
 
 	if (create)
 	{	//if the toolbar has been recreated, readd the buttons
-		_nbCurrentButtons = _nbTotalButtons;
 		WORD btnSize = static_cast<WORD>(_dpiManager.scale((_state == TB_LARGE || _state == TB_LARGE2) ? 36 : 30));
 		::SendMessage(_hSelf, TB_SETBUTTONSIZE , 0, MAKELONG(btnSize, btnSize));
-		::SendMessage(_hSelf, TB_ADDBUTTONS, _nbTotalButtons, reinterpret_cast<LPARAM>(_pTBB.get()));
+		std::vector<TBBUTTON> buttons(_pTBB.get(), _pTBB.get() + _nbTotalButtons);
+		if (_nativeCustomizer) {
+			auto choice = _mainLayout.begin();
+			for (size_t i = 0; i < _nbButtons; ++i) {
+				if (!_pTBB[i].idCommand)
+					continue;
+				const auto source = std::find_if(_pTBB.get(), _pTBB.get() + _nbButtons,
+					[&](const TBBUTTON &button) { return button.idCommand == choice->command; });
+				buttons[i] = *source;
+				buttons[i].fsState = static_cast<BYTE>((buttons[i].fsState & ~TBSTATE_HIDDEN) |
+					(choice->visible ? 0 : TBSTATE_HIDDEN));
+				++choice;
+			}
+			const auto existingStyle = SendMessageW(_hSelf, TB_GETEXTENDEDSTYLE, 0, 0);
+			SendMessageW(_hSelf, TB_SETEXTENDEDSTYLE, 0, existingStyle | TBSTYLE_EX_MIXEDBUTTONS);
+			TBBUTTON shortcut{};
+			shortcut.iBitmap = I_IMAGENONE;
+			shortcut.idCommand = IDM_NOTEQU_MAIN_TOOLBAR;
+			shortcut.fsState = TBSTATE_ENABLED;
+			shortcut.fsStyle = BTNS_BUTTON | BTNS_SHOWTEXT | BTNS_AUTOSIZE;
+			shortcut.iString = reinterpret_cast<INT_PTR>(L"\u22ef");
+			buttons.insert(buttons.begin(), shortcut);
+		}
+		SendMessageW(_hSelf, TB_ADDBUTTONS, buttons.size(), reinterpret_cast<LPARAM>(buttons.data()));
         ::SendMessage(_hSelf, TB_SETPADDING,0,MAKELPARAM(_dpiManager.scale(14),_dpiManager.scale(14)));
         ::SendMessage(_hSelf, TB_SETBUTTONSIZE,0,MAKELPARAM(btnSize,btnSize));
 	}
@@ -675,40 +873,27 @@ void ToolBar::registerDynBtnDM(UINT message, toolbarIconsWithDarkMode* iconHandl
 
 void ToolBar::doPopup(POINT chevPoint)
 {
-	//first find hidden buttons
-	int width = Window::getWidth();
-
-	size_t start = 0;
-	RECT btnRect = {0,0,0,0};
-	while (start < _nbCurrentButtons)
-	{
-		::SendMessage(_hSelf, TB_GETITEMRECT, start, reinterpret_cast<LPARAM>(&btnRect));
-		if (btnRect.right > width)
-			break;
-		++start;
-	}
-
-	if (start < _nbCurrentButtons)
-	{	//some buttons are hidden
-		HMENU menu = ::CreatePopupMenu();
-		std::wstring text;
-		while (start < _nbCurrentButtons)
-		{
-			int cmd = _pTBB[start].idCommand;
-			getNameStrFromCmd(cmd, text);
-			if (_pTBB[start].idCommand != 0)
-			{
-				if (::SendMessage(_hSelf, TB_ISBUTTONENABLED, cmd, 0) != 0)
-					AppendMenu(menu, MF_ENABLED, cmd, text.c_str());
-				else
-					AppendMenu(menu, MF_DISABLED|MF_GRAYED, cmd, text.c_str());
-			} else
-				AppendMenu(menu, MF_SEPARATOR, 0, L"");
-			
-			++start;
+	const int width = Window::getWidth();
+	const auto count = SendMessageW(_hSelf, TB_BUTTONCOUNT, 0, 0);
+	HMENU menu = CreatePopupMenu();
+	for (LRESULT i = 0; i < count; ++i) {
+		RECT rect{};
+		TBBUTTON button{};
+		if (!SendMessageW(_hSelf, TB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&rect)) || rect.right <= width ||
+			!SendMessageW(_hSelf, TB_GETBUTTON, i, reinterpret_cast<LPARAM>(&button)) || (button.fsState & TBSTATE_HIDDEN))
+			continue;
+		if (button.idCommand) {
+			std::wstring text;
+			getNameStrFromCmd(button.idCommand, text);
+			AppendMenuW(menu, (button.fsState & TBSTATE_ENABLED) ? MF_ENABLED : MF_GRAYED,
+				button.idCommand, text.c_str());
+		} else {
+			AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 		}
-		TrackPopupMenu(menu, 0, chevPoint.x, chevPoint.y, 0, _hSelf, NULL);
 	}
+	if (GetMenuItemCount(menu) > 0)
+		TrackPopupMenu(menu, 0, chevPoint.x, chevPoint.y, 0, _hSelf, nullptr);
+	DestroyMenu(menu);
 }
 
 void ToolBar::resizeIconsDpi(UINT dpi)

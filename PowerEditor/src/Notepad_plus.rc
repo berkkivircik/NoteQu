@@ -870,6 +870,7 @@ BEGIN
         MENUITEM "Te&xt Direction LTR",                  IDM_EDIT_LTR
         MENUITEM SEPARATOR
         MENUITEM "Monito&ring (tail -f)",  	IDM_VIEW_MONITORING
+        MENUITEM "Customize Main Toolbar...", IDM_NOTEQU_MAIN_TOOLBAR
     END
 
     POPUP "E&ncoding"
