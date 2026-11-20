@@ -6,12 +6,21 @@ on:
         description: Published NoteQu version to install
         required: true
       to-version:
-        description: Latest compatible published NoteQu version
+        description: Target published version or signed draft version
         required: true
+      candidate-updater:
+        description: Run the candidate macOS updater beside the original signed installation
+        type: boolean
+        default: false
+      staged-macos-403:
+        description: Validate an unpublished signed target with an HTTP 403 fixture on macOS 15
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
   update:
+    if: ${{ !inputs.staged-macos-403 }}
     strategy:
       fail-fast: false
       matrix:
@@ -20,6 +29,17 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        if: inputs.candidate-updater && runner.os == 'macOS'
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Build the candidate macOS updater
+        if: inputs.candidate-updater && runner.os == 'macOS'
+        shell: bash
+        run: |
+          go -C updater build -trimpath -o "$RUNNER_TEMP/NoteQuUpdater" .
+          codesign --force --sign - "$RUNNER_TEMP/NoteQuUpdater"
       - name: Install independent signature verifier
         shell: bash
         run: |
@@ -33,15 +53,80 @@ jobs:
         env:
           FROM_VERSION: ${{ inputs.from-version }}
           TO_VERSION: ${{ inputs.to-version }}
+          USE_CANDIDATE: ${{ inputs.candidate-updater }}
         shell: bash
         run: |
-          if [ -f .e2e-venv/Scripts/python.exe ]; then
-            .e2e-venv/Scripts/python.exe updater/e2e_release.py --from-version "$FROM_VERSION" --to-version "$TO_VERSION" --output dist/update-e2e.json
-          else
-            .e2e-venv/bin/python updater/e2e_release.py --from-version "$FROM_VERSION" --to-version "$TO_VERSION" --output dist/update-e2e.json
+          python=.e2e-venv/bin/python
+          if [ -f .e2e-venv/Scripts/python.exe ]; then python=.e2e-venv/Scripts/python.exe; fi
+          args=(--from-version "$FROM_VERSION" --to-version "$TO_VERSION" --output dist/update-e2e.json)
+          if [ "$RUNNER_OS" = macOS ] && [ "$USE_CANDIDATE" = true ]; then
+            args+=(--candidate-updater "$RUNNER_TEMP/NoteQuUpdater")
           fi
+          "$python" updater/e2e_release.py "${args[@]}"
+      - name: Diagnose anonymous GitHub access after a macOS test failure
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          headers=$(mktemp)
+          body=$(mktemp)
+          status=$(curl --silent --show-error --max-time 15 --dump-header "$headers" --output "$body" \
+            --write-out '%{http_code}' --user-agent 'NoteQu-Updater' --header 'Accept: application/vnd.github+json' \
+            'https://api.github.com/repos/berkkivircik/NoteQu/releases?per_page=100&page=1') || exit 0
+          printf 'Anonymous releases API status: %s\n' "$status"
+          grep -iE '^(x-ratelimit-(limit|remaining|reset|resource):|retry-after:)' "$headers" || true
+          if jq -e '(.message // "") | startswith("API rate limit exceeded")' "$body" >/dev/null; then
+            printf 'GitHub reported that the anonymous API rate limit was exceeded.\n'
+          fi
+          curl --silent --show-error --location --max-time 15 --output /dev/null \
+            --write-out 'Public macOS manifest status: %{http_code}\n' \
+            'https://github.com/berkkivircik/NoteQu/releases/latest/download/NoteQu-update-darwin-arm64.json'
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         if: always()
         with:
           name: updater-e2e-${{ matrix.os }}
+          path: dist/update-e2e.json
+
+  staged-macos-403:
+    if: inputs.staged-macos-403
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      # GitHub requires repository push access to list draft releases.
+      contents: write
+    env:
+      FROM_VERSION: ${{ inputs.from-version }}
+      TO_VERSION: ${{ inputs.to-version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Download signed macOS draft assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          draft=$(gh release view "v$TO_VERSION" --json isDraft,targetCommitish)
+          jq -e --arg source "$GITHUB_SHA" '.isDraft and .targetCommitish == $source' <<< "$draft"
+          gh release download "v$TO_VERSION" \
+            --pattern 'NoteQu-update-darwin-arm64.json*' \
+            --pattern "NoteQu-$TO_VERSION-darwin-arm64-update.zip" \
+            --dir "$RUNNER_TEMP/notequ-staged-assets"
+      - name: Verify macOS upgrade with a controlled HTTP 403
+        run: |
+          sw_vers
+          python3 -m venv .e2e-venv
+          .e2e-venv/bin/python -m pip install -r updater/signing-requirements.txt
+          python3 updater/build_staged_update_fixture.py --version "$TO_VERSION" \
+            --assets "$RUNNER_TEMP/notequ-staged-assets" --output "$RUNNER_TEMP/NoteQuUpdater"
+          .e2e-venv/bin/python updater/e2e_release.py \
+            --from-version "$FROM_VERSION" --to-version "$TO_VERSION" \
+            --candidate-updater "$RUNNER_TEMP/NoteQuUpdater" \
+            --staged-target "$RUNNER_TEMP/notequ-staged-assets" --output dist/update-e2e.json
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        if: always()
+        with:
+          name: updater-staged-403-macos-15
           path: dist/update-e2e.json

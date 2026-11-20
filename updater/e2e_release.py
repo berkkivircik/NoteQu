@@ -22,13 +22,17 @@ def download(url, target):
     with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent':'NoteQu-Release-Verification'}), timeout=60) as response:
         target.write_bytes(response.read())
 
-def payload(version, system, arch, work):
-    folder = work / version; folder.mkdir()
-    base = BASE + 'v' + version + '/'
+def payload(version, system, arch, work, staged=None):
     name = f'NoteQu-update-{system}-{arch}.json'
-    for file in [name, name+'.sig', f'NoteQu-{version}-{system}-{arch}-update.zip']:
-        download(base+file, folder/file)
-    archive = folder/f'NoteQu-{version}-{system}-{arch}-update.zip'
+    archive_name = f'NoteQu-{version}-{system}-{arch}-update.zip'
+    folder = staged
+    if folder is None:
+        folder = work / version
+        folder.mkdir()
+        base = BASE + 'v' + version + '/'
+        for file in (name, name + '.sig', archive_name):
+            download(base + file, folder / file)
+    archive = folder / archive_name
     manifest = verify((folder/name).read_bytes(), (folder/(name+'.sig')).read_bytes(), archive, system, arch, version)
     return archive, manifest
 
@@ -97,46 +101,112 @@ def windows_test(work, profile, archive, manifest, target_version):
     close(exe)
     return {'bootstrap':'1.3.3 -> '+manifest['version'],'unsaved_session_restored':True,'custom_commands_and_macro_preserved':True,'protected_files':len(protected),'plugin_loaded_and_command_executed_before_and_after':True,'application':str(app)}
 
-def macos_test(work,profile,archive,manifest,target_version):
+def quit_macos(app):
+    # Quit the exact temporary bundle, allowing AppKit to flush the session.
+    subprocess.run(['osascript', '-e', 'tell application "' + str(app) + '" to quit'], check=True, timeout=30)
+
+
+def run_macos_candidate(helper, app, profile, env, current):
+    # Keep the starting bundle byte-for-byte authentic for ownership verification.
+    editor = app / 'Contents/MacOS/NoteQu'
+    subprocess.run([str(editor), '--self-test', 'seed'], env=env, check=True, timeout=60)
+    process = subprocess.Popen([str(editor)], env=env)
+    try:
+        subprocess.run(
+            [str(helper), '-mode', 'manual', '-root', str(app), '-profile', str(profile),
+             '-version', current, '-parent', str(process.pid)],
+            env=env, check=True, timeout=180,
+        )
+        wait_for(profile, 'waiting for normal exit')
+        assert process.poll() is None, 'Updater closed the application without consent.'
+        quit_macos(app)
+        assert process.wait(timeout=30) == 0
+    finally:
+        if process.poll() is None:
+            quit_macos(app)
+            process.wait(timeout=30)
+
+
+def macos_test(work,profile,archive,manifest,target_version,candidate_updater=None):
     previous=work/'previous.zip'
-    download(BASE+'v1.5.0-macos.5/NoteX-1.5.0-macos-arm64.zip',previous)
-    subprocess.run(['ditto','-x','-k',str(previous),str(work/'previous')],check=True)
-    old=work/'previous/NoteX.app/Contents/MacOS/NoteX'
-    env=dict(os.environ,NOTEX_PROFILE=str(profile),NOTEX_TEST_UPDATE_PROFILE=str(profile))
-    subprocess.run([str(old),'--self-test','seed'],env=env,check=True,timeout=60)
+    env=dict(os.environ,NOTEQU_PROFILE=str(profile),NOTEX_PROFILE=str(profile),NOTEX_TEST_UPDATE_PROFILE=str(profile))
+    if candidate_updater is None:
+        download(BASE+'v1.5.0-macos.5/NoteX-1.5.0-macos-arm64.zip',previous)
+        subprocess.run(['ditto','-x','-k',str(previous),str(work/'previous')],check=True)
+        old=work/'previous/NoteX.app/Contents/MacOS/NoteX'
+        subprocess.run([str(old),'--self-test','seed'],env=env,check=True,timeout=60)
     app=work/'NoteQu.app';app.mkdir();install_payload(archive,app,manifest)
     subprocess.run(['codesign','--verify','--strict',str(app)],check=True)
     protected=[]
     for name in ['my-personal-note.txt','plugins/custom-extension.dat','themes/custom-theme.json','unknown-future-setting.json']:
         p=profile/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('Synthetic preserved data: '+name);protected.append(p)
+    # Protect a saved document outside the profile and outside the application.
+    document = work / 'Documents' / 'Personal note.txt'
+    document.parent.mkdir()
+    document.write_text('Synthetic saved document — café, Türkçe, 日本語.\n', encoding='utf-8')
+    protected.append(document)
     before=hashes(protected)
-    # Prove the separately installed first updater version reads the previous real application's session.
-    subprocess.run([str(app/'Contents/MacOS/NoteQu'),'--self-test','restore-legacy'],env=env,check=True,timeout=60)
-    proc=subprocess.Popen([str(app/'Contents/MacOS/NoteQu'),'--self-test','update-release'],env=env)
-    wait_for(profile,'waiting for normal exit');proc.wait(timeout=30)
-    assert proc.returncode==0
+    editor = app / 'Contents/MacOS/NoteQu'
+    if candidate_updater is not None:
+        run_macos_candidate(candidate_updater, app, profile, env, manifest['version'])
+    else:
+        # Prove the separately installed updater release reads the old application's session.
+        subprocess.run([str(editor),'--self-test','restore-legacy'],env=env,check=True,timeout=60)
+        proc=subprocess.Popen([str(editor),'--self-test','update-release'],env=env)
+        wait_for(profile,'waiting for normal exit');proc.wait(timeout=30)
+        assert proc.returncode==0
     wait_for(profile,'committed: '+target_version)
     subprocess.run(['codesign','--verify','--strict',str(app)],check=True)
-    # The restarted app belongs to this unique bundle. Quit it through its ordinary AppKit path.
-    subprocess.run(['osascript','-e','tell application "'+str(app)+'" to quit'],check=True,timeout=30)
+    quit_macos(app)
     time.sleep(2)
-    subprocess.run([str(app/'Contents/MacOS/NoteQu'),'--self-test','update-verify'],env=env,check=True,timeout=60)
+    verify_mode = 'restore' if candidate_updater is not None else 'update-verify'
+    subprocess.run([str(editor),'--self-test',verify_mode],env=env,check=True,timeout=60)
     assert hashes(protected)==before
-    return {'bootstrap':'1.5.0-macos.5 -> '+manifest['version'],'unsaved_session_and_format_restored':True,'custom_preferences_preserved':True,'protected_files':len(protected),'application':str(app)}
+    states = [json.loads(line)['state'] for line in (profile/'update-events.jsonl').read_text().splitlines()]
+    fallback = next((state for state in states if state.startswith('release API HTTP ')), None)
+    return {
+        'bootstrap': manifest['version'] if candidate_updater is not None else '1.5.0-macos.5 -> '+manifest['version'],
+        'candidate_updater': candidate_updater is not None,
+        'discovery_fallback': fallback,
+        'unsaved_session_and_format_restored': True,
+        'custom_preferences_preserved': True,
+        'saved_document_bytes_preserved': True,
+        'protected_files': len(protected),
+        'application': str(app),
+    }
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--from-version',required=True);p.add_argument('--to-version',required=True);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--from-version', required=True)
+    p.add_argument('--to-version', required=True)
+    p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--candidate-updater', type=Path, help='macOS updater built from the candidate source')
+    p.add_argument('--staged-target', type=Path, help='signed macOS draft assets for the HTTP 403 integration test')
+    a = p.parse_args()
     system='windows' if os.name=='nt' else 'darwin';arch='amd64' if system=='windows' else 'arm64'
+    if a.candidate_updater is not None and (system != 'darwin' or not a.candidate_updater.is_file()):
+        p.error('--candidate-updater must point to a macOS helper')
+    candidate = a.candidate_updater.resolve() if a.candidate_updater is not None else None
+    if a.staged_target is not None and (candidate is None or not a.staged_target.is_dir()):
+        p.error('--staged-target requires the macOS fixture updater and a signed draft asset directory')
     work=Path(tempfile.mkdtemp(prefix='notequ-real-release-e2e-'));profile=work/'test-update-profile';profile.mkdir()
     (profile/'allow-update-test').touch();(profile/'notex-updates.json').write_text('{"disabled":true,"futureSetting":"preserve"}')
     archive,manifest=payload(a.from_version,system,arch,work)
-    _,target=payload(a.to_version,system,arch,work)
-    result=(windows_test if system=='windows' else macos_test)(work,profile,archive,manifest,a.to_version)
+    target_archive, target = payload(a.to_version, system, arch, work, a.staged_target)
+    if system == 'windows':
+        result = windows_test(work, profile, archive, manifest, a.to_version)
+    else:
+        result = macos_test(work, profile, archive, manifest, a.to_version, candidate)
     assert json.loads((profile/'notex-updates.json').read_text())['futureSetting']=='preserve'
     installed=Path(result.pop('application'))
     for name,spec in target['files'].items(): assert hashlib.sha256((installed/name).read_bytes()).hexdigest()==spec['sha256']
+    if a.staged_target is not None:
+        assert result['discovery_fallback'] == 'release API HTTP 403; using public release link'
     result.update(passed=True,platform=system,architecture=arch,from_version=a.from_version,to_version=a.to_version,
-                  source=target['source'],real_public_release=True,version_and_signature_checks_enabled=True,
+                  source=target['source'],real_public_release=a.staged_target is None,
+                  staged_target=a.staged_target is not None,
+                  target_archive_sha256=hashlib.sha256(target_archive.read_bytes()).hexdigest(),
+                  version_and_signature_checks_enabled=True,
                   consent_dialogs_automated=True,normal_shutdown=True,new_application_started=True)
     a.output.parent.mkdir(parents=True,exist_ok=True);a.output.write_text(json.dumps(result,indent=2),encoding='utf-8');print(json.dumps(result))
     # Keep synthetic evidence and transaction backups until independently reviewed.
