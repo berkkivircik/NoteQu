@@ -1,5 +1,12 @@
 # NoteQu modification notice
 
+## 2026-11-20 — Windows menu branding and main toolbar
+
+Apply NoteQu product labels after Windows menu localization without rewriting
+language profiles. Added a profile-local editor for the visibility and order of
+standard toolbar buttons. Existing Customize Toolbar plugin installations keep
+their plugin-managed toolbar.
+
 ## 2026-11-20 — GitHub update discovery fallback
 
 Added a public release link fallback when GitHub denies or throttles REST

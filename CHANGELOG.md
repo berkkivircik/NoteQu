@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.6
+
+- Keep NoteQu branding in the Windows Help menu when using English, Turkish, or
+  Spanish, including existing language profiles.
+- Add built-in visibility and order controls for the standard Windows toolbar.
+  The formatting toolbar has its own customization. Installations with the
+  Customize Toolbar plugin retain the plugin's controls and configuration.
+
 ## 1.7.5
 
 - Fixed update discovery when the anonymous GitHub API returns HTTP 403 or
