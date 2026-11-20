@@ -34,6 +34,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
           python PowerEditor/Packaging/NoteQu/verify_package.py dist/NoteQu
           if ($LASTEXITCODE -ne 0) { throw 'Package verification failed.' }
+      - name: Windows branding and toolbar profile tests
+        run: |
+          python PowerEditor/Test/NoteQu/windows_parity.py --package dist/NoteQu | Tee-Object -FilePath dist/native-tests/windows-parity.log
+          if ($LASTEXITCODE -ne 0) { throw 'Windows branding or toolbar parity tests failed.' }
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         with:
           name: NoteQu-windows-amd64

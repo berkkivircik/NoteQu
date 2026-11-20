@@ -19,6 +19,7 @@
 
 #include <windows.h>
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -51,6 +52,7 @@ struct ToolbarPluginButtonsConf
 };
 
 class ReBar;
+class NativeLangSpeaker;
 
 class ToolBar : public Window
 {
@@ -109,6 +111,13 @@ public :
 	void addToRebar(ReBar * rebar);
 
 	void resizeIconsDpi(UINT dpi);
+	void customize(const NativeLangSpeaker &language, HMENU menu);
+	bool hasNativeCustomizer() const { return _nativeCustomizer; }
+
+	struct Choice {
+		int command;
+		bool visible;
+	};
 
 private :
 	std::unique_ptr<TBBUTTON[]> _pTBB = nullptr;
@@ -120,7 +129,10 @@ private :
 	size_t _nbButtons = 0;
 	size_t _nbDynButtons = 0;
 	size_t _nbTotalButtons = 0;
-	size_t _nbCurrentButtons = 0;
+	bool _nativeCustomizer = false;
+	std::filesystem::path _mainLayoutPath;
+	std::vector<Choice> _mainDefaults, _mainLayout;
+	void loadMainLayout();
 	ReBar * _pRebar = nullptr;
 	REBARBANDINFO _rbBand = {};
 	std::vector<iconLocator> _customIconVect;

@@ -3775,6 +3775,12 @@ void Notepad_plus::command(int id)
         case IDM_UPDATE_NPP:
             noteQuUpdate(L"manual");
             break;
+        case IDM_NOTEQU_MAIN_TOOLBAR:
+        {
+            _toolBar.customize(_nativeLangSpeaker, _mainMenuHandle);
+            break;
+        }
+
         case IDM_NOTEQU_UPDATE_SETTINGS:
             noteQuUpdate(L"settings");
             break;

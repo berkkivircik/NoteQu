@@ -21,6 +21,7 @@
 
 #include "localization.h"
 #include "Notepad_plus_Window.h"
+#include "NoteQuProductUI.h"
 #include "functionListPanel.h"
 #include "xmlMatchedTagsHighlighter.h"
 #include "VerticalFileSwitcher.h"
@@ -1270,7 +1271,10 @@ BOOL Notepad_plus::notify(SCNotification *notification)
 
 				if (hWin == _rebarTop.getHSelf())
 				{
-					getNameStrFromCmd(id, tipTmp);
+					if (id == IDM_NOTEQU_MAIN_TOOLBAR)
+						tipTmp = NoteQuProductUI::labels(_nativeLangSpeaker).mainToolbar;
+					else
+						getNameStrFromCmd(id, tipTmp);
 					if (tipTmp.length() >= 80)
 						return FALSE;
 
